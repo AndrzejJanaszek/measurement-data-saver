@@ -1,4 +1,3 @@
-# tests/test_database.py
 import sqlite3
 import os
 import pytest
