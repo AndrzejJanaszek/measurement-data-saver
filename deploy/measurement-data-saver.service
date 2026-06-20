@@ -1,0 +1,19 @@
+[Unit]
+Description=Measurement Data Saver Service
+After=network.target
+
+[Service]
+# Ścieżka do folderu z projektem
+WorkingDirectory=/home/andrzej/Storage/measurement-data-saver
+# Uruchomienie aplikacji za pomocą Poetry z pełnymi ścieżkami systemowymi
+ExecStart=/home/andrzej/.local/bin/poetry run python src/main.py
+# Automatyczny restart w razie wywrotki programu (odczeka 5 sekund przed próbą)
+Restart=always
+RestartSec=5
+
+Environment=PYTHONPATH=/home/andrzej/Storage/measurement-data-saver
+Environment=PYTHONUNBUFFERED=1
+User=andrzej
+
+[Install]
+WantedBy=multi-user.target

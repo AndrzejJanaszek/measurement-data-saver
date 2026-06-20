@@ -3,9 +3,13 @@ SERIAL_PORT = "/dev/ttyUSB0"
 BAUDRATE = 9600
 TIMEOUT = 0.1  # non-blocking read timeout
 
-START_CHAR = b'\x02'
-END_CHAR_1 = b'\x03'
-END_CHAR_2 = None  
+# START_CHAR = b'\x02'
+# END_CHAR_1 = b'\x03'
+# END_CHAR_2 = None  
+
+START_CHAR = None
+END_CHAR_1 = b'\r'  # To jest CR
+END_CHAR_2 = b'\n'  # To jest LF
 
 RECONNECT_DELAY = 5.0
 
