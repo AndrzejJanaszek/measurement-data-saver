@@ -1,4 +1,4 @@
 .pytest_cache
 __pycache__
 
-e2e_test_measurements.db
+*.db
