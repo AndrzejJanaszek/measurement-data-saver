@@ -105,7 +105,18 @@ pygments = ">=2.7.2"
 [package.extras]
 dev = ["argcomplete", "attrs (>=19.2)", "hypothesis (>=3.56)", "mock", "requests", "setuptools", "xmlschema"]
 
+[[package]]
+name = "sdnotify"
+version = "0.3.2"
+description = "A pure Python implementation of systemd's service notification protocol (sd_notify)"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "sdnotify-0.3.2.tar.gz", hash = "sha256:73977fc746b36cc41184dd43c3fe81323e7b8b06c2bb0826c4f59a20c56bb9f1"},
+]
+
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.14"
-content-hash = "8ec27975f05b21d3cb6effbca7b318b8f9b75c2e8192e5baf2068cceea6e7210"
+content-hash = "2a9fb7b3e2a26f92243ee7fdf84a5654bb58390aa82c3016eebfc8700a540f87"

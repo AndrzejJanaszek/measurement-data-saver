@@ -7,6 +7,7 @@ from src import config
 from src.database import init_db, save_measurement
 from src.serial_reader import SerialReader
 from src.parse import parse_raw_frame
+import sdnotify
 
 # Konfiguracja logowania
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
@@ -14,6 +15,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - 
 def main():
     logging.info("Uruchamianie aplikacji RPi Serial Logger...")
     
+    notifier = sdnotify.SystemdNotifier()  # <-- DODANO
+    notifier.notify("READY=1")
+
     # 1. Inicjalizacja bazy danych (tworzenie tabeli jeśli nie istnieje)
     try:
         init_db()
@@ -55,7 +59,11 @@ def main():
                     
                     if success:
                         human_time = datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                        logging.info(f"Zapisano do bazy: {latest_value} o godzinie {human_time}")
+                        
+                        notifier.notify("WATCHDOG=1")
+                        # wyłączone na czas wdrożenia
+                        # logging.info(f"Zapisano do bazy: {latest_value} o godzinie {human_time}")
+                        
                         # Po zapisie możemy wyczyścić latest_value, jeśli chcemy wymusić 
                         # posiadanie NOWEJ ramki w kolejnej sekundzie. Zostawiamy ją jednak,
                         # na wypadek gdyby urządzenie nadawało rzadziej niż co sekundę (zapisze ostatnią znaną).

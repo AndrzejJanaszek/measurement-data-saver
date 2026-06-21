@@ -15,5 +15,9 @@ Environment=PYTHONPATH=/home/andrzej/Storage/measurement-data-saver
 Environment=PYTHONUNBUFFERED=1
 User=andrzej
 
+Type=notify
+WatchdogSec=15s
+Restart=always
+
 [Install]
 WantedBy=multi-user.target
