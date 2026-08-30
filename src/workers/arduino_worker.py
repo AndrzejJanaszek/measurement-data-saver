@@ -4,6 +4,7 @@ import time
 
 from src import config
 from src.database import save_temperature_batch, save_pin_states_batch, DatabaseFatalError
+from src.heartbeat import HEARTBEAT_INTERVAL
 from src.parse import parse_arduino_frame
 from src.pin_tracker import PinStateTracker
 from src.serial_reader import SerialReader
@@ -20,6 +21,11 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
     (może zawierać kilka czujników naraz - jeden batch INSERT).
     Piny: przepuszczane przez PinStateTracker, zapisywane do bazy TYLKO gdy
     faktycznie się zmieniły względem poprzedniego znanego stanu.
+
+    Jeśli przez dłuższy czas nie napłynie żadna poprawna ramka "temps"/"pins"
+    (mimo że port jest otwarty, bez wyjątku pyserial) - wymuszamy reconnect,
+    tak samo jak w meter_worker. Bannery diagnostyczne Arduino (patrz
+    parse.py) NIE liczą się jako poprawne dane - tylko realny "temps"/"pins".
     """
     if reader is None:
         reader = SerialReader(
@@ -34,6 +40,7 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
 
     pin_tracker = PinStateTracker()
     last_heartbeat_time = 0.0
+    last_valid_frame_time = time.monotonic()
 
     logging.info("[arduino] Wątek uruchomiony.")
 
@@ -45,6 +52,7 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
                 parsed = parse_arduino_frame(raw_frame)
 
                 if parsed is not None:
+                    last_valid_frame_time = time.monotonic()
                     kind, payload = parsed
                     now = time.time()
 
@@ -59,7 +67,12 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
                             logging.debug(f"[arduino] Zapisano zmiany pinów: {changes}")
 
             now_mono = time.monotonic()
-            if now_mono - last_heartbeat_time >= 5.0:
+
+            if now_mono - last_valid_frame_time >= config.ARDUINO_NO_DATA_TIMEOUT:
+                reader.force_reconnect(f"brak poprawnych danych przez {config.ARDUINO_NO_DATA_TIMEOUT:.0f}s")
+                last_valid_frame_time = time.monotonic()
+
+            if now_mono - last_heartbeat_time >= HEARTBEAT_INTERVAL:
                 heartbeat.beat("arduino")
                 last_heartbeat_time = now_mono
 

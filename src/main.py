@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - 
 
 WORKER_NAMES = ["miernik", "arduino"]
 MAIN_LOOP_INTERVAL = 1.0       # jak często main sprawdza stan wątków
-WATCHDOG_NOTIFY_INTERVAL = 5.0  # jak często main wysyła WATCHDOG=1 do systemd
+WATCHDOG_NOTIFY_INTERVAL = 3.0  # jak często main próbuje wysłać WATCHDOG=1 do systemd (spójne z heartbeat.HEARTBEAT_INTERVAL)
 
 
 def main():

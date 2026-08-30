@@ -2,10 +2,8 @@
 import threading
 import time
 
-# Worker zgłasza się (beat) co ~5s, main.py sprawdza/wysyła WATCHDOG=1 co ~5s.
-# Brak heartbeatu dłużej niż ten próg = "coś nie działa" (worker zawieszony).
-HEARTBEAT_INTERVAL = 5.0
-UNHEALTHY_AFTER = 5.0
+HEARTBEAT_INTERVAL = 3.0
+UNHEALTHY_AFTER = 7.0
 
 
 class HeartbeatMonitor:

@@ -1,3 +1,4 @@
+# src/serial_reader.py
 import logging
 import serial
 from src import config
@@ -103,6 +104,21 @@ class SerialReader:
             self._handle_disconnect()
 
         return None
+
+    def force_reconnect(self, reason: str = ""):
+        """
+        Wymusza zamknięcie i ponowne otwarcie portu, MIMO że pyserial nie
+        zgłosił żadnego wyjątku. Używane przez workery, gdy port technicznie
+        "działa" (żadnego błędu I/O), ale przez dłuższy czas nie napłynęła
+        żadna poprawna ramka danych - to sygnał, że coś może być nie tak
+        z połączeniem/urządzeniem, więc reset jest rozsądną pierwszą linią
+        obrony (nie gwarantuje naprawy - jeśli urządzenie jest fizycznie
+        odłączone lub zepsute, reconnect na tym poziomie nic nie da, ale
+        SerialReader i tak będzie dalej próbował co reconnect_delay sekund).
+        """
+        suffix = f" ({reason})" if reason else ""
+        logging.warning(f"[{self.name}] Wymuszam ponowne połączenie z portem{suffix}...")
+        self._handle_disconnect()
 
     def _handle_disconnect(self):
         """Pomocnicza metoda do bezpiecznego czyszczenia zasobów po odpięciu kabla."""
