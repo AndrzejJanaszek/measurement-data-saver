@@ -3,7 +3,7 @@ import logging
 import time
 
 from src import config
-from src.database import save_measurement, DatabaseFatalError
+from src.database import save_measurement, DatabaseFatalError, open_worker_connection
 from src.heartbeat import HEARTBEAT_INTERVAL
 from src.parse import parse_raw_frame
 from src.serial_reader import SerialReader
@@ -36,6 +36,11 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
             name="miernik",
         )
 
+    # JEDNO długożyjące połączenie na cały czas życia wątku - patrz docstring
+    # open_worker_connection() w database.py (naprawa wycieku deskryptorów
+    # plików, które wcześniej otwierało nowe połączenie przy każdym zapisie).
+    db_conn = open_worker_connection("miernik")
+
     last_saved_time = time.time()
     last_heartbeat_time = 0.0
     last_valid_frame_time = time.monotonic()
@@ -63,7 +68,7 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
             current_time = time.time()
             if current_time - last_saved_time >= config.SAVE_DELAY:
                 if latest_value is not None:
-                    save_measurement(current_time, latest_value, session_id)
+                    save_measurement(db_conn, current_time, latest_value, session_id)
                     latest_value = None
                 elif last_seen_raw_frame is not None:
                     logging.warning(
@@ -99,6 +104,10 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
         try:
             if reader.ser and reader.ser.is_open:
                 reader.ser.close()
+        except Exception:
+            pass
+        try:
+            db_conn.close()
         except Exception:
             pass
         logging.info("[miernik] Wątek zakończony.")

@@ -1,4 +1,5 @@
 # src/database.py
+import contextlib
 import sqlite3
 import logging
 import time
@@ -24,7 +25,12 @@ def init_db():
     try:
         config.DB_DIR.mkdir(parents=True, exist_ok=True)
 
-        with sqlite3.connect(config.DB_PATH) as conn:
+        # contextlib.closing() gwarantuje wywołanie conn.close() na wyjściu -
+        # w przeciwieństwie do natywnego context managera sqlite3.Connection,
+        # który przy __exit__ robi TYLKO commit/rollback, NIGDY close(). To
+        # jest źródło wycieku deskryptorów plików, który naprawiamy w całym
+        # tym module (patrz też open_worker_connection() niżej).
+        with contextlib.closing(sqlite3.connect(config.DB_PATH)) as conn:
             cursor = conn.cursor()
 
             # WAL pozwala zapisom (miernik/arduino-temps/arduino-pins z trzech
@@ -97,7 +103,7 @@ def create_session() -> int:
     session_id służy głównie do grupowania rekordów z tego samego uruchomienia,
     niezależnie od tego, czy zegar systemowy jest wiarygodny.
     """
-    with sqlite3.connect(config.DB_PATH, timeout=2.0) as conn:
+    with contextlib.closing(sqlite3.connect(config.DB_PATH, timeout=2.0)) as conn:
         cursor = conn.cursor()
         cursor.execute("INSERT INTO sessions (started_at) VALUES (?)", (time.time(),))
         conn.commit()
@@ -106,25 +112,50 @@ def create_session() -> int:
         return session_id
 
 
-def _run_with_retry(work, description: str) -> bool:
+def open_worker_connection(name: str) -> sqlite3.Connection:
     """
-    Wspólna logika retry/panic dla operacji zapisu do bazy.
+    Otwiera JEDNO, długożyjące połączenie SQLite przeznaczone na cały czas
+    życia wątku roboczego (miernik / arduino).
+
+    WAŻNE - dlaczego to jest konieczne: poprzednia wersja tego modułu otwierała
+    nowe połączenie sqlite3.connect() przy KAŻDYM pojedynczym zapisie (każda
+    ramka pomiarowa, każda zmiana pinu). Przy częstotliwości kilku zapisów/s
+    z trzech wątków naraz prowadziło to do stopniowego wyczerpywania puli
+    deskryptorów plików procesu, aż po ok. 4-5 minutach działania proces nie
+    mógł już otworzyć NOWEGO pliku (błąd "unable to open database file"),
+    co wymuszało fatalny restart usługi w regularnych, w pełni deterministycz-
+    nych odstępach czasu - potwierdzone na sprzęcie (/proc/<pid>/fd rosło
+    w czasie aż do limitu). Każdy worker wywołuje tę funkcję RAZ na starcie
+    swojej pętli i przekazuje zwrócone połączenie do wszystkich save_*(),
+    a przy zamykaniu wątku (finally) wywołuje conn.close().
+
+    Połączenie jest używane WYŁĄCZNIE w wątku, który je utworzył - sqlite3
+    domyślnie pilnuje tego sam (check_same_thread=True), więc próba użycia
+    go z innego wątku rzuci wyjątek zamiast po cichu psuć dane.
+    """
+    conn = sqlite3.connect(config.DB_PATH, timeout=5.0)
+    logging.debug(f"[{name}] Otwarto długożyjące połączenie z bazą danych.")
+    return conn
+
+
+def _run_with_retry(conn: sqlite3.Connection, work, description: str) -> bool:
+    """
+    Wspólna logika retry/panic dla operacji zapisu NA ISTNIEJĄCYM,
+    długożyjącym połączeniu (nie otwiera już nowych połączeń per zapis).
     `work(cursor)` powinno wykonać INSERT(y) na przekazanym kursorze.
-    Powiela zachowanie oryginalnego save_measurement: przy trwałym braku
-    dostępu do pliku bazy wymusza restart całej usługi (systemd Restart=always).
     """
     for attempt in (1, 2):
         try:
-            with sqlite3.connect(config.DB_PATH, timeout=2.0) as conn:
-                cursor = conn.cursor()
-                work(cursor)
-                conn.commit()
-                return True
+            cursor = conn.cursor()
+            work(cursor)
+            conn.commit()
+            return True
 
         except sqlite3.OperationalError as e:
-            if "unable to open database file" in str(e).lower():
+            error_text = str(e).lower()
+            if "unable to open database file" in error_text or "database is locked" in error_text:
                 if attempt == 1:
-                    logging.warning(f"[{description}] Wykryto problem z plikiem bazy danych. Odczekanie 1s i ponowna próba...")
+                    logging.warning(f"[{description}] Wykryto chwilowy problem z bazą danych: {e}. Odczekanie 1s i ponowna próba...")
                     time.sleep(1.0)
                     continue
                 else:
@@ -142,20 +173,21 @@ def _run_with_retry(work, description: str) -> bool:
     return False
 
 
-def save_measurement(timestamp: float, value: float, session_id: int) -> bool:
-    """Zapisuje pojedynczy pomiar z miernika do bazy danych."""
+def save_measurement(conn: sqlite3.Connection, timestamp: float, value: float, session_id: int) -> bool:
+    """Zapisuje pojedynczy pomiar z miernika do bazy danych, na przekazanym połączeniu."""
     def work(cursor):
         cursor.execute(
             "INSERT INTO measurements (timestamp, value, session_id) VALUES (?, ?, ?)",
             (timestamp, value, session_id)
         )
-    return _run_with_retry(work, "measurements")
+    return _run_with_retry(conn, work, "measurements")
 
 
-def save_temperature_batch(timestamp: float, readings: list[tuple[str, float]], session_id: int) -> bool:
+def save_temperature_batch(conn: sqlite3.Connection, timestamp: float, readings: list[tuple[str, float]], session_id: int) -> bool:
     """
     Zapisuje jedną porcję odczytów temperatury (może zawierać wiele czujników
-    naraz, tak jak przychodzą w jednej ramce JSON od Arduino).
+    naraz, tak jak przychodzą w jednej ramce JSON od Arduino), na przekazanym
+    połączeniu.
     readings: lista krotek (sensor_address, value).
     """
     if not readings:
@@ -166,13 +198,14 @@ def save_temperature_batch(timestamp: float, readings: list[tuple[str, float]], 
             "INSERT INTO temperature_measurements (timestamp, sensor_address, value, session_id) VALUES (?, ?, ?, ?)",
             [(timestamp, address, value, session_id) for address, value in readings]
         )
-    return _run_with_retry(work, "temperature_measurements")
+    return _run_with_retry(conn, work, "temperature_measurements")
 
 
-def save_pin_states_batch(timestamp: float, changes: dict[int, int], session_id: int) -> bool:
+def save_pin_states_batch(conn: sqlite3.Connection, timestamp: float, changes: dict[int, int], session_id: int) -> bool:
     """
     Zapisuje tylko te piny, których wartość faktycznie się zmieniła
-    (filtrowanie odbywa się wcześniej, w PinStateTracker).
+    (filtrowanie odbywa się wcześniej, w PinStateTracker), na przekazanym
+    połączeniu.
     changes: słownik {pin: value}.
     """
     if not changes:
@@ -183,7 +216,7 @@ def save_pin_states_batch(timestamp: float, changes: dict[int, int], session_id:
             "INSERT INTO pin_states (timestamp, pin, value, session_id) VALUES (?, ?, ?, ?)",
             [(timestamp, pin, value, session_id) for pin, value in changes.items()]
         )
-    return _run_with_retry(work, "pin_states")
+    return _run_with_retry(conn, work, "pin_states")
 
 
 def _raise_fatal(message: str):

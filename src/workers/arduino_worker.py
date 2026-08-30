@@ -3,7 +3,7 @@ import logging
 import time
 
 from src import config
-from src.database import save_temperature_batch, save_pin_states_batch, DatabaseFatalError
+from src.database import save_temperature_batch, save_pin_states_batch, DatabaseFatalError, open_worker_connection
 from src.heartbeat import HEARTBEAT_INTERVAL
 from src.parse import parse_arduino_frame
 from src.pin_tracker import PinStateTracker
@@ -38,6 +38,11 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
             name="arduino",
         )
 
+    # JEDNO długożyjące połączenie na cały czas życia wątku, współdzielone
+    # przez zapisy temps i pins - patrz docstring open_worker_connection()
+    # w database.py (naprawa wycieku deskryptorów plików).
+    db_conn = open_worker_connection("arduino")
+
     pin_tracker = PinStateTracker()
     last_heartbeat_time = 0.0
     last_valid_frame_time = time.monotonic()
@@ -57,13 +62,13 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
                     now = time.time()
 
                     if kind == "temps":
-                        save_temperature_batch(now, payload, session_id)
+                        save_temperature_batch(db_conn, now, payload, session_id)
                         logging.debug(f"[arduino] Zapisano {len(payload)} odczytów temperatury.")
 
                     elif kind == "pins":
                         changes = pin_tracker.get_changes(payload)
                         if changes:
-                            save_pin_states_batch(now, changes, session_id)
+                            save_pin_states_batch(db_conn, now, changes, session_id)
                             logging.debug(f"[arduino] Zapisano zmiany pinów: {changes}")
 
             now_mono = time.monotonic()
@@ -88,6 +93,10 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
         try:
             if reader.ser and reader.ser.is_open:
                 reader.ser.close()
+        except Exception:
+            pass
+        try:
+            db_conn.close()
         except Exception:
             pass
         logging.info("[arduino] Wątek zakończony.")
