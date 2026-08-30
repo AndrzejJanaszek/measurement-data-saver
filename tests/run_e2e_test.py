@@ -1,118 +1,180 @@
-import sys
-from pathlib import Path
+"""
+Test end-to-end: uruchamia PRAWDZIWE meter_worker i arduino_worker (z prawdziwą
+klasą SerialReader, nie mockiem) na symulowanych portach szeregowych (pty),
+tak jak działałyby razem pod main.py, i weryfikuje że dane z obu urządzeń
+trafiają poprawnie do wspólnej bazy w ramach jednej sesji.
 
-# Automatycznie wykrywa główny folder projektu i dodaje go do ścieżek wyszukiwania Pythona
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+Wcześniejsza wersja tego pliku:
+  - w ogóle nie była odpalana przez pytest (brak funkcji zaczynającej się
+    od "test_" - plik był "cicho" zbierany, ale zero testów z niego startowało),
+  - zależała od zewnętrznego binarki `socat` (niedostępnej domyślnie na wielu
+    systemach, w tym w środowisku CI/sandbox używanym do tej rewizji testów),
+  - testowała stary, jednowątkowy main() sprzed refaktoru na miernik+Arduino.
 
-
-import time
-import math
-import serial
-import subprocess
+Moduł `pty` z biblioteki standardowej daje dokładnie to samo (parę
+master/slave symulującą prawdziwy port szeregowy) bez żadnych zewnętrznych
+zależności - i to właśnie na nim opierały się manualne testy w trakcie
+tworzenia tej funkcjonalności.
+"""
+import json
 import os
-from threading import Thread
+import pty
+import sqlite3
+import threading
+import time
 
-# Importujemy aplikację i jej konfigurację
-from src import config
-from src.main import main
+import pytest
 
-# Definiujemy ścieżki wirtualnych portów
-VTTY_SENDER = "/tmp/vtty_sender"
-VTTY_READER = "/tmp/vtty_reader"
+from src import config, database
+from src.heartbeat import HeartbeatMonitor, FatalErrorSignal
+from src.workers import meter_worker, arduino_worker
 
-def generate_sinus_value(t: float) -> float:
-    """Generuje wartość funkcji sinus w zależności od czasu."""
-    return 20.0 + 10.0 * math.sin(t / 2.0)
 
-def simulator_worker():
-    """Funkcja działająca w osobnym wątku, wysyłająca dane typu sinus."""
-    print("[Symulator] Oczekiwanie na inicjalizację portu...")
-    time.sleep(1)  # Dajemy chwilę na wstanie socata
-    
+def build_meter_frame(value: float) -> bytes:
+    """Buduje ramkę zgodnie z AKTUALNĄ konfiguracją znaków START/END miernika
+    z config.py - test od razu wykryje regresję, gdyby ktoś zmienił protokół."""
+    start = config.START_CHAR or b""
+    end = (config.END_CHAR_1 or b"") + (config.END_CHAR_2 or b"")
+    return start + f"{value:.2f}".encode("utf-8") + end
+
+
+def build_arduino_frame(payload: dict) -> bytes:
+    start = config.ARDUINO_START_CHAR or b""
+    end = (config.ARDUINO_END_CHAR_1 or b"") + (config.ARDUINO_END_CHAR_2 or b"")
+    return start + json.dumps(payload).encode("utf-8") + end
+
+
+@pytest.fixture
+def fast_save_delay():
+    original = config.SAVE_DELAY
+    config.SAVE_DELAY = 0.05
+    yield
+    config.SAVE_DELAY = original
+
+
+@pytest.fixture
+def simulated_ports():
+    """Tworzy dwa niezależne pseudo-terminale (miernik + Arduino) i podmienia
+    config.SERIAL_PORT / config.ARDUINO_SERIAL_PORT na czas testu."""
+    meter_master, meter_slave = pty.openpty()
+    arduino_master, arduino_slave = pty.openpty()
+
+    original_meter_port = config.SERIAL_PORT
+    original_arduino_port = config.ARDUINO_SERIAL_PORT
+    config.SERIAL_PORT = os.ttyname(meter_slave)
+    config.ARDUINO_SERIAL_PORT = os.ttyname(arduino_slave)
+
+    yield meter_master, arduino_master
+
+    config.SERIAL_PORT = original_meter_port
+    config.ARDUINO_SERIAL_PORT = original_arduino_port
+
+
+def test_e2e_meter_and_arduino_write_to_shared_session(simulated_ports, fast_save_delay):
+    meter_master, arduino_master = simulated_ports
+
+    session_id = database.create_session()
+    stop_event = threading.Event()
+    heartbeat = HeartbeatMonitor()
+    fatal_signal = FatalErrorSignal()
+
+    t_meter = threading.Thread(
+        target=meter_worker.run,
+        args=(session_id, stop_event, heartbeat, fatal_signal),
+        name="e2e-meter-worker",
+    )
+    t_arduino = threading.Thread(
+        target=arduino_worker.run,
+        args=(session_id, stop_event, heartbeat, fatal_signal),
+        name="e2e-arduino-worker",
+    )
+    t_meter.start()
+    t_arduino.start()
+
     try:
-        ser = serial.Serial(VTTY_SENDER, baudrate=9600, timeout=1)
-        print("[Symulator] Połączono z portem nadawczym. Rozpoczynam nadawanie...")
-        
-        # Nadajemy dane przez 10 sekund, po czym kończymy test
-        start_test_time = time.time()
-        while time.time() - start_test_time < 10:
-            current_time = time.time()
-            val = generate_sinus_value(current_time)
-            
-            # Formatujemy ramkę: [START]Wartosc[END]
-            frame = config.START_CHAR + f"{val:.2f}".encode('utf-8') + config.END_CHAR_1
-            ser.write(frame)
-            print(f"[Symulator] Wysłano: {frame.decode('utf-8', errors='ignore')}")
-            
-            time.sleep(0.2)  # Częste próbkowanie czujnika
-            
-        print("[Symulator] Zakończono generowanie danych testowych.")
-    except Exception as e:
-        print(f"[Symulator] Błąd: {e}")
+        time.sleep(0.2)  # czas na otwarcie prawdziwych portów przez SerialReader
 
-def run_e2e_test():
-    print("=== URUCHAMIANIE TESTU INTEGRACYJNEGO END-TO-END ===")
+        os.write(meter_master, build_meter_frame(23.45))
+        os.write(arduino_master, build_arduino_frame({"temps": [{"a": "AAA", "t": 25.5}]}))
+        os.write(arduino_master, build_arduino_frame({"pins": {"4": 1, "5": 0}}))
 
-    # 1. Dynamicznie nadpisujemy konfigurację programu w locie!
-    # Dzięki temu NIE musisz nic zmieniać ręcznie w src/config.py
-    config.SERIAL_PORT = VTTY_READER
-    config.DB_PATH = "e2e_test_measurements.db"
-    config.SAVE_DELAY = 1.0  # Zapis co sekundę
+        time.sleep(0.3)  # czas na przetworzenie i zapisanie
 
-    # Czyszczenie starej bazy testowej, jeśli istnieje
-    if os.path.exists(config.DB_PATH):
-        os.remove(config.DB_PATH)
+        # Oba wątki powinny być "zdrowe" (heartbeat) w trakcie normalnej pracy
+        assert heartbeat.all_healthy(["miernik", "arduino"], max_age=5.0) is True
+        assert fatal_signal.is_set() is False
 
-    # 2. Uruchamiamy socat jako proces w tle (subprocess)
-    socat_cmd = [
-        "socat", "-d", "-d",
-        f"pty,link={VTTY_SENDER},raw,echo=0",
-        f"pty,link={VTTY_READER},raw,echo=0"
-    ]
-    socat_process = subprocess.Popen(socat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("[System] Wirtualny tunel socat został uruchomiony w tle.")
-
-    # 3. Uruchamiamy nasz symulator sinusa w osobnym wątku (Thread)
-    sim_thread = Thread(target=simulator_worker, daemon=True)
-    sim_thread.start()
-
-    # 4. Uruchamiamy główną aplikację (w głównym wątku)
-    print("[System] Uruchamianie aplikacji głównej main()...")
-    print("[System] Test potrwa 10 sekund, po czym zamknie się automatycznie.")
-    
-    try:
-        # Ponieważ main() ma pętlę "while True", aplikacja będzie działać.
-        # Odpalimy ją wewnątrz bloku try/except, ale przerwiemy ją czasowo.
-        # Aby main() nie działał w nieskończoność, użyjemy prostego mechanizmu:
-        # Pozwolimy głównemu wątkowi kręcić aplikacją, dopóki wątek symulatora żyje.
-        
-        # Mały hack: odpalamy main w osobnym wątku, żebyśmy mogli go ubić po 10 sekundach
-        app_thread = Thread(target=main, daemon=True)
-        app_thread.start()
-        
-        # Czekamy 10 sekund na zakończenie pracy przez symulator
-        sim_thread.join()
-        time.sleep(1) # Chwila na ostatni zapis do bazy
-        
-        print("\n=== KONIEC TESTU ===")
-        print("Test zakończony pomyślnie.")
-        
     finally:
-        # 5. SPRZĄTANIE: Bezwarunkowo zabijamy proces socat w tle
-        socat_process.terminate()
-        socat_process.wait()
-        print("[System] Wirtualny tunel socat zamknięty.")
-        
-        # Weryfikacja bazy danych
-        if os.path.exists(config.DB_PATH):
-            import sqlite3
-            conn = sqlite3.connect(config.DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*), AVG(value) FROM measurements")
-            count, avg = cursor.fetchone()
-            print(f"[Wynik] W bazie e2e_test_measurements.db zapisano {count} pomiarów.")
-            print(f"[Wynik] Średnia wartość z sinusa: {avg:.2f}")
-            conn.close()
+        stop_event.set()
+        t_meter.join(timeout=5.0)
+        t_arduino.join(timeout=5.0)
+
+    assert not t_meter.is_alive(), "Wątek miernika nie zakończył się po stop_event"
+    assert not t_arduino.is_alive(), "Wątek Arduino nie zakończył się po stop_event"
+
+    with sqlite3.connect(config.DB_PATH) as conn:
+        measurements = conn.execute(
+            "SELECT value FROM measurements WHERE session_id = ?", (session_id,)
+        ).fetchall()
+        temps = conn.execute(
+            "SELECT sensor_address, value FROM temperature_measurements WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        pins = conn.execute(
+            "SELECT pin, value FROM pin_states WHERE session_id = ? ORDER BY pin",
+            (session_id,),
+        ).fetchall()
+
+    assert measurements == [(23.45,)]
+    assert temps == [("AAA", 25.5)]
+    assert pins == [(4, 1), (5, 0)]
+
+
+def test_e2e_arduino_startup_banner_does_not_break_subsequent_real_data(simulated_ports, fast_save_delay):
+    """
+    Symuluje realny scenariusz zaobserwowany na sprzęcie: Arduino po
+    reset/starcie wysyła banner diagnostyczny PRZED pierwszą prawdziwą
+    ramką danych. Worker powinien go zignorować i mimo to poprawnie
+    przetworzyć dane, które przyjdą zaraz potem.
+    """
+    meter_master, arduino_master = simulated_ports
+
+    session_id = database.create_session()
+    stop_event = threading.Event()
+    heartbeat = HeartbeatMonitor()
+    fatal_signal = FatalErrorSignal()
+
+    t_arduino = threading.Thread(
+        target=arduino_worker.run,
+        args=(session_id, stop_event, heartbeat, fatal_signal),
+        name="e2e-arduino-worker-banner",
+    )
+    t_arduino.start()
+
+    try:
+        time.sleep(0.2)
+
+        os.write(arduino_master, b"Locating devices...Found 4 devices.\n")
+        os.write(arduino_master, b"Found device 0 with address: 28A8F126AB240B1C\n")
+        os.write(arduino_master, build_arduino_frame({"pins": {"4": 1}}))
+
+        time.sleep(0.2)
+
+    finally:
+        stop_event.set()
+        t_arduino.join(timeout=5.0)
+
+    assert not t_arduino.is_alive()
+
+    with sqlite3.connect(config.DB_PATH) as conn:
+        pins = conn.execute(
+            "SELECT pin, value FROM pin_states WHERE session_id = ?", (session_id,)
+        ).fetchall()
+
+    assert pins == [(4, 1)]
+
 
 if __name__ == "__main__":
-    run_e2e_test()
+    # Wygodne uruchomienie samego pliku e2e bez pamiętania pełnej komendy pytest.
+    import sys
+    raise SystemExit(pytest.main([__file__, "-v"] + sys.argv[1:]))
