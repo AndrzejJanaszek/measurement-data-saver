@@ -100,9 +100,16 @@ def test_same_connection_reused_across_multiple_saves_does_not_leak_fds():
     Regresja dla błędu 'unable to open database file' po ~4 minutach działania:
     wcześniej KAŻDY zapis otwierał nowe połączenie (i nigdy go nie zamykał,
     bo `with sqlite3.connect(...) as conn` NIE wywołuje close()). Sprawdzamy,
-    że liczba otwartych deskryptorów plików procesu NIE rośnie w trakcie wielu
+    że liczba otwartych deskryptorów plików procesu NIE ROŚNIE w trakcie wielu
     kolejnych zapisów na tym samym, długożyjącym połączeniu.
+
+    Uwaga: assert używa "<=", nie "==". W pełnym zestawie testów (uruchamianym
+    razem z innymi plikami, np. run_e2e_test.py otwierającym pty i wątki)
+    liczba FD całego procesu może w międzyczasie spaść z powodu GC/sprzątania
+    niepowiązanych zasobów z WCZEŚNIEJSZYCH testów - to nie jest wyciek.
+    Wyciek objawia się WZROSTEM, więc tylko to sprawdzamy.
     """
+    import gc
     import os
 
     if not os.path.isdir(f"/proc/{os.getpid()}/fd"):
@@ -117,13 +124,14 @@ def test_same_connection_reused_across_multiple_saves_does_not_leak_fds():
         for i in range(50):
             database.save_measurement(conn, float(i), float(i), sid)
 
+        gc.collect()  # normalizujemy stan przed pomiarem bazowym
         baseline = fd_count()
 
         for i in range(200):
             database.save_measurement(conn, float(i), float(i), sid)
 
         after = fd_count()
-        assert after == baseline, (
+        assert after <= baseline, (
             f"Liczba otwartych deskryptorów wzrosła z {baseline} do {after} "
             f"po 200 dodatkowych zapisach - podejrzenie wycieku FD."
         )
@@ -170,9 +178,10 @@ class _FakeConnection:
 
 def test_save_measurement_heals_on_transient_lock_error():
     """
-    Pierwsza próba trafia na chwilowy błąd operacyjny (np. 'database is
-    locked'), druga się udaje - save_measurement powinno zwrócić True po
-    jednym odczekaniu.
+    Pierwsza próba trafia na chwilowy błąd operacyjny ('database is locked'),
+    druga się udaje - save_measurement powinno zwrócić True po jednym,
+    krótkim odczekaniu (backoff dla kontencji, NIE ten sam co dla
+    unable-to-open-file).
     """
     sid = 1
     mock_cursor = MagicMock()
@@ -184,14 +193,37 @@ def test_save_measurement_heals_on_transient_lock_error():
 
     assert result is True
     assert fake_conn.commit_calls == 1
-    mock_sleep.assert_called_once_with(1.0)
+    mock_sleep.assert_called_once_with(0.2)
+
+
+def test_save_measurement_does_not_raise_fatal_on_persistent_lock_error():
+    """
+    REGRESJA: 'database is locked' to zwykle chwilowa kontencja między dwoma
+    wątkami piszącymi do tego samego pliku WAL - NIE powinno restartować
+    całej usługi tak jak 'unable to open database file'. Nawet gdy blokada
+    utrzymuje się przez wszystkie próby retry, save_measurement powinno
+    zwrócić False (utrata jednego zapisu), a NIE rzucić DatabaseFatalError.
+    """
+    sid = 1
+    mock_cursor = MagicMock()
+    mock_cursor.execute.side_effect = sqlite3.OperationalError("database is locked")
+    fake_conn = _FakeConnection(mock_cursor)
+
+    with patch("time.sleep") as mock_sleep:
+        result = database.save_measurement(fake_conn, 1.0, 2.0, sid)
+
+    assert result is False
+    assert fake_conn.commit_calls == 0
+    # 3 próby backoff (0.2s, 0.5s, 1.0s), żadna nie eskaluje do sys.exit/fatal
+    assert mock_sleep.call_count == 3
 
 
 def test_save_measurement_raises_fatal_on_persistent_open_error():
     """
     Trwały błąd 'unable to open database file' przy obu próbach powinien
     rzucić DatabaseFatalError (NIE sys.exit - patrz docstring w database.py
-    dlaczego sys.exit z wątku roboczego by nie zadziałało).
+    dlaczego sys.exit z wątku roboczego by nie zadziałało). To pozostaje
+    fatalne w odróżnieniu od 'database is locked' - patrz test wyżej.
     """
     sid = 1
     mock_cursor = MagicMock()

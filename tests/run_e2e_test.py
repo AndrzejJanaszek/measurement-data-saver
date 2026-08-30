@@ -69,6 +69,15 @@ def simulated_ports():
     config.SERIAL_PORT = original_meter_port
     config.ARDUINO_SERIAL_PORT = original_arduino_port
 
+    # Zamykamy deskryptory master (slave zamyka SerialReader w workerze) -
+    # bez tego wyciekałyby aż do końca całego procesu pytest, zaburzając
+    # liczniki FD w innych testach (patrz test_database.py).
+    for fd in (meter_master, arduino_master):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
 
 def test_e2e_meter_and_arduino_write_to_shared_session(simulated_ports, fast_save_delay):
     meter_master, arduino_master = simulated_ports

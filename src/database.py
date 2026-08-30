@@ -140,11 +140,35 @@ def open_worker_connection(name: str) -> sqlite3.Connection:
 
 def _run_with_retry(conn: sqlite3.Connection, work, description: str) -> bool:
     """
-    Wspólna logika retry/panic dla operacji zapisu NA ISTNIEJĄCYM,
-    długożyjącym połączeniu (nie otwiera już nowych połączeń per zapis).
-    `work(cursor)` powinno wykonać INSERT(y) na przekazanym kursorze.
+    Wspólna logika retry NA ISTNIEJĄCYM, długożyjącym połączeniu (nie otwiera
+    już nowych połączeń per zapis). `work(cursor)` powinno wykonać INSERT(y)
+    na przekazanym kursorze.
+
+    Zachowanie zależy od typu błędu:
+    - "unable to open database file": trwały problem z systemem plików (to
+      dokładnie nasz potwierdzony historyczny incydent - wyciek deskryptorów
+      plików przy otwieraniu nowego połączenia na każdy zapis). Eskaluje do
+      DatabaseFatalError po MAX_OPEN_FILE_ATTEMPTS próbach, co wymusza
+      restart całej usługi - uzasadnione, bo to sygnał poważnego problemu
+      na poziomie OS/dysku.
+    - "database is locked": zwykle CHWILOWA kontencja między dwoma wątkami
+      (miernik/arduino) piszącymi do tego samego pliku WAL. Połączenie ma
+      już własny wewnętrzny busy_timeout (patrz open_worker_connection),
+      więc ten wyjątek widzimy DOPIERO PO tym, jak SQLite sam już czekał.
+      Restart całej usługi z tego powodu byłby przesadą (i mógłby
+      spowodować WIĘCEJ przestojów niż rozwiązać) - próbujemy jeszcze
+      kilka razy z rosnącym odstępem, a jeśli nadal się nie uda, tracimy
+      TEN JEDEN zapis (log błędu) zamiast zabijać oba wątki robocze.
+    - inne błędy: 2 szybkie próby, potem False (bez eskalacji do fatal).
     """
-    for attempt in (1, 2):
+    MAX_OPEN_FILE_ATTEMPTS = 2
+    LOCK_RETRY_DELAYS = (0.2, 0.5, 1.0)  # rosnący backoff, nie-fatalny
+
+    open_file_attempt = 0
+    lock_attempt = 0
+    generic_attempt = 0
+
+    while True:
         try:
             cursor = conn.cursor()
             work(cursor)
@@ -153,24 +177,42 @@ def _run_with_retry(conn: sqlite3.Connection, work, description: str) -> bool:
 
         except sqlite3.OperationalError as e:
             error_text = str(e).lower()
-            if "unable to open database file" in error_text or "database is locked" in error_text:
-                if attempt == 1:
-                    logging.warning(f"[{description}] Wykryto chwilowy problem z bazą danych: {e}. Odczekanie 1s i ponowna próba...")
+
+            if "unable to open database file" in error_text:
+                open_file_attempt += 1
+                if open_file_attempt < MAX_OPEN_FILE_ATTEMPTS:
+                    logging.warning(f"[{description}] Wykryto problem z plikiem bazy danych. Odczekanie 1s i ponowna próba...")
                     time.sleep(1.0)
                     continue
-                else:
-                    _raise_fatal(f"Trwały błąd dostępu do bazy ({description}): {e}")
+                _raise_fatal(f"Trwały błąd dostępu do bazy ({description}): {e}")
+
+            elif "database is locked" in error_text:
+                if lock_attempt < len(LOCK_RETRY_DELAYS):
+                    delay = LOCK_RETRY_DELAYS[lock_attempt]
+                    lock_attempt += 1
+                    logging.warning(
+                        f"[{description}] Chwilowa kontencja bazy danych (database is locked), "
+                        f"próba {lock_attempt}/{len(LOCK_RETRY_DELAYS)}, odczekanie {delay}s..."
+                    )
+                    time.sleep(delay)
+                    continue
+                logging.error(
+                    f"[{description}] Trwała kontencja bazy danych (database is locked) po "
+                    f"{lock_attempt} dodatkowych próbach - pomijam TEN zapis. Usługa NIE jest restartowana."
+                )
+                return False
+
             else:
-                logging.error(f"[{description}] Błąd operacyjny bazy danych (Próba {attempt}/2): {e}")
-                if attempt == 2:
+                generic_attempt += 1
+                logging.error(f"[{description}] Błąd operacyjny bazy danych (Próba {generic_attempt}/2): {e}")
+                if generic_attempt >= 2:
                     return False
 
         except sqlite3.Error as e:
-            logging.error(f"[{description}] Ogólny błąd bazy danych (Próba {attempt}/2): {e}")
-            if attempt == 2:
+            generic_attempt += 1
+            logging.error(f"[{description}] Ogólny błąd bazy danych (Próba {generic_attempt}/2): {e}")
+            if generic_attempt >= 2:
                 return False
-
-    return False
 
 
 def save_measurement(conn: sqlite3.Connection, timestamp: float, value: float, session_id: int) -> bool:

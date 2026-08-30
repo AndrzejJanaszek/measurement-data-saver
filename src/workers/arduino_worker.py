@@ -2,7 +2,7 @@
 import logging
 import time
 
-from src import config
+from src import config, worker_names
 from src.database import save_temperature_batch, save_pin_states_batch, DatabaseFatalError, open_worker_connection
 from src.heartbeat import HEARTBEAT_INTERVAL
 from src.parse import parse_arduino_frame
@@ -27,6 +27,8 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
     tak samo jak w meter_worker. Bannery diagnostyczne Arduino (patrz
     parse.py) NIE liczą się jako poprawne dane - tylko realny "temps"/"pins".
     """
+    name = worker_names.ARDUINO
+
     if reader is None:
         reader = SerialReader(
             port=config.ARDUINO_SERIAL_PORT,
@@ -35,19 +37,19 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
             start_char=config.ARDUINO_START_CHAR,
             end_char_1=config.ARDUINO_END_CHAR_1,
             end_char_2=config.ARDUINO_END_CHAR_2,
-            name="arduino",
+            name=name,
         )
 
     # JEDNO długożyjące połączenie na cały czas życia wątku, współdzielone
     # przez zapisy temps i pins - patrz docstring open_worker_connection()
     # w database.py (naprawa wycieku deskryptorów plików).
-    db_conn = open_worker_connection("arduino")
+    db_conn = open_worker_connection(name)
 
     pin_tracker = PinStateTracker()
     last_heartbeat_time = 0.0
     last_valid_frame_time = time.monotonic()
 
-    logging.info("[arduino] Wątek uruchomiony.")
+    logging.info(f"[{name}] Wątek uruchomiony.")
 
     try:
         while not stop_event.is_set():
@@ -63,13 +65,13 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
 
                     if kind == "temps":
                         save_temperature_batch(db_conn, now, payload, session_id)
-                        logging.debug(f"[arduino] Zapisano {len(payload)} odczytów temperatury.")
+                        logging.debug(f"[{name}] Zapisano {len(payload)} odczytów temperatury.")
 
                     elif kind == "pins":
                         changes = pin_tracker.get_changes(payload)
                         if changes:
                             save_pin_states_batch(db_conn, now, changes, session_id)
-                            logging.debug(f"[arduino] Zapisano zmiany pinów: {changes}")
+                            logging.debug(f"[{name}] Zapisano zmiany pinów: {changes}")
 
             now_mono = time.monotonic()
 
@@ -78,17 +80,17 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
                 last_valid_frame_time = time.monotonic()
 
             if now_mono - last_heartbeat_time >= HEARTBEAT_INTERVAL:
-                heartbeat.beat("arduino")
+                heartbeat.beat(name)
                 last_heartbeat_time = now_mono
 
             time.sleep(0.001)
 
     except DatabaseFatalError as e:
-        logging.critical(f"[arduino] Fatalny błąd bazy danych, kończę wątek: {e}")
-        fatal_signal.trigger("arduino", str(e))
+        logging.critical(f"[{name}] Fatalny błąd bazy danych, kończę wątek: {e}")
+        fatal_signal.trigger(name, str(e))
     except Exception as e:
-        logging.critical(f"[arduino] Nieoczekiwany błąd w pętli workera: {e}", exc_info=True)
-        fatal_signal.trigger("arduino", str(e))
+        logging.critical(f"[{name}] Nieoczekiwany błąd w pętli workera: {e}", exc_info=True)
+        fatal_signal.trigger(name, str(e))
     finally:
         try:
             if reader.ser and reader.ser.is_open:
@@ -99,4 +101,4 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
             db_conn.close()
         except Exception:
             pass
-        logging.info("[arduino] Wątek zakończony.")
+        logging.info(f"[{name}] Wątek zakończony.")

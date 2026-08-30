@@ -2,7 +2,7 @@
 import logging
 import time
 
-from src import config
+from src import config, worker_names
 from src.database import save_measurement, DatabaseFatalError, open_worker_connection
 from src.heartbeat import HEARTBEAT_INTERVAL
 from src.parse import parse_raw_frame
@@ -25,6 +25,8 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
     jakikolwiek inny nieoczekiwany wyjątek kończy TYLKO ten wątek i sygnalizuje
     fatal_signal - main.py decyduje wtedy o restarcie całej usługi.
     """
+    name = worker_names.METER
+
     if reader is None:
         reader = SerialReader(
             port=config.SERIAL_PORT,
@@ -33,13 +35,13 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
             start_char=config.START_CHAR,
             end_char_1=config.END_CHAR_1,
             end_char_2=config.END_CHAR_2,
-            name="miernik",
+            name=name,
         )
 
     # JEDNO długożyjące połączenie na cały czas życia wątku - patrz docstring
     # open_worker_connection() w database.py (naprawa wycieku deskryptorów
     # plików, które wcześniej otwierało nowe połączenie przy każdym zapisie).
-    db_conn = open_worker_connection("miernik")
+    db_conn = open_worker_connection(name)
 
     last_saved_time = time.time()
     last_heartbeat_time = 0.0
@@ -51,7 +53,7 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
     # parsowania albo nieoczekiwany format ramki z miernika).
     last_seen_raw_frame = None
 
-    logging.info("[miernik] Wątek uruchomiony.")
+    logging.info(f"[{name}] Wątek uruchomiony.")
 
     try:
         while not stop_event.is_set():
@@ -63,7 +65,7 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
                 if parsed_value is not None:
                     latest_value = parsed_value
                     last_valid_frame_time = time.monotonic()
-                    logging.debug(f"[miernik] Odebrano nową wartość: {latest_value}")
+                    logging.debug(f"[{name}] Odebrano nową wartość: {latest_value}")
 
             current_time = time.time()
             if current_time - last_saved_time >= config.SAVE_DELAY:
@@ -72,11 +74,11 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
                     latest_value = None
                 elif last_seen_raw_frame is not None:
                     logging.warning(
-                        f"[miernik] Minęła sekunda, ale nie odebrano poprawnej ramki danych. "
+                        f"[{name}] Minęła sekunda, ale nie odebrano poprawnej ramki danych. "
                         f"Ostatnia otrzymana (niesparsowana) ramka: {last_seen_raw_frame!r}"
                     )
                 else:
-                    logging.warning("[miernik] Minęła sekunda, ale port nie wysłał żadnej ramki (cisza na porcie).")
+                    logging.warning(f"[{name}] Minęła sekunda, ale port nie wysłał żadnej ramki (cisza na porcie).")
                 last_saved_time = current_time
                 last_seen_raw_frame = None  # zaczynamy nowe okno od zera
 
@@ -89,17 +91,17 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
                 last_valid_frame_time = time.monotonic()
 
             if now_mono - last_heartbeat_time >= HEARTBEAT_INTERVAL:
-                heartbeat.beat("miernik")
+                heartbeat.beat(name)
                 last_heartbeat_time = now_mono
 
             time.sleep(0.001)
 
     except DatabaseFatalError as e:
-        logging.critical(f"[miernik] Fatalny błąd bazy danych, kończę wątek: {e}")
-        fatal_signal.trigger("miernik", str(e))
+        logging.critical(f"[{name}] Fatalny błąd bazy danych, kończę wątek: {e}")
+        fatal_signal.trigger(name, str(e))
     except Exception as e:
-        logging.critical(f"[miernik] Nieoczekiwany błąd w pętli workera: {e}", exc_info=True)
-        fatal_signal.trigger("miernik", str(e))
+        logging.critical(f"[{name}] Nieoczekiwany błąd w pętli workera: {e}", exc_info=True)
+        fatal_signal.trigger(name, str(e))
     finally:
         try:
             if reader.ser and reader.ser.is_open:
@@ -110,4 +112,4 @@ def run(session_id: int, stop_event, heartbeat, fatal_signal, reader=None):
             db_conn.close()
         except Exception:
             pass
-        logging.info("[miernik] Wątek zakończony.")
+        logging.info(f"[{name}] Wątek zakończony.")

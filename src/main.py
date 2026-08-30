@@ -1,5 +1,6 @@
 # src/main.py
 import logging
+import signal
 import sys
 import threading
 import time
@@ -9,19 +10,35 @@ import sdnotify
 from src.database import init_db, create_session
 from src.heartbeat import HeartbeatMonitor, FatalErrorSignal, UNHEALTHY_AFTER
 from src.workers import meter_worker, arduino_worker
+from src import worker_names
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 
-WORKER_NAMES = ["miernik", "arduino"]
+WORKER_NAMES = worker_names.ALL
 MAIN_LOOP_INTERVAL = 1.0       # jak często main sprawdza stan wątków
 WATCHDOG_NOTIFY_INTERVAL = 3.0  # jak często main próbuje wysłać WATCHDOG=1 do systemd (spójne z heartbeat.HEARTBEAT_INTERVAL)
 
 
+def _handle_sigterm(signum, frame):
+    """
+    KRYTYCZNE: systemd (systemctl stop/restart - w tym KAŻDE wdrożenie przez
+    install.sh!) domyślnie wysyła SIGTERM, nie SIGINT. Python NIE mapuje
+    SIGTERM na KeyboardInterrupt automatycznie (w przeciwieństwie do SIGINT),
+    więc bez tego handlera main() kończyłby się natychmiast, z pominięciem
+    całego bloku finally (stop_event.set(), zamknięcie portów/połączeń z bazą,
+    log "bezpiecznie zatrzymana"). Rzucenie tu KeyboardInterrupt przekierowuje
+    SIGTERM na dokładnie tę samą, już przetestowaną ścieżkę czystego zamknięcia
+    co Ctrl+C.
+    """
+    raise KeyboardInterrupt()
+
+
 def main():
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     logging.info("Uruchamianie aplikacji RPi Serial Logger (v2 - miernik + arduino)...")
 
     notifier = sdnotify.SystemdNotifier()
-    notifier.notify("READY=1")
 
     # 1. Inicjalizacja bazy danych i nowej sesji (grupowanie rekordów z tego uruchomienia)
     try:
@@ -31,19 +48,21 @@ def main():
         logging.critical(f"Nie można zainicjalizować bazy danych. Zamykanie aplikacji. Błąd: {e}")
         sys.exit(1)
 
+    notifier.notify("READY=1")
+
     # 2. Przygotowanie mechanizmów współdzielonych między wątkami
     stop_event = threading.Event()
     heartbeat = HeartbeatMonitor()
     fatal_signal = FatalErrorSignal()
 
     threads = {
-        "miernik": threading.Thread(
+        worker_names.METER: threading.Thread(
             target=meter_worker.run,
             args=(session_id, stop_event, heartbeat, fatal_signal),
             name="meter-worker",
             daemon=True,
         ),
-        "arduino": threading.Thread(
+        worker_names.ARDUINO: threading.Thread(
             target=arduino_worker.run,
             args=(session_id, stop_event, heartbeat, fatal_signal),
             name="arduino-worker",
@@ -98,7 +117,9 @@ def main():
             time.sleep(MAIN_LOOP_INTERVAL)
 
     except KeyboardInterrupt:
-        logging.info("Wykryto przerwanie z klawiatury (Ctrl+C). Zamykanie aplikacji...")
+        # Ta gałąź obsługuje ZARÓWNO Ctrl+C (SIGINT, natywnie mapowane przez
+        # Pythona), JAK I SIGTERM (przekierowany tutaj przez _handle_sigterm).
+        logging.info("Wykryto sygnał zatrzymania (Ctrl+C lub SIGTERM). Zamykanie aplikacji...")
     finally:
         # Wykonuje się zarówno przy Ctrl+C, jak i przy sys.exit(1) powyżej -
         # dajemy wątkom szansę na czyste zamknięcie portów szeregowych.
