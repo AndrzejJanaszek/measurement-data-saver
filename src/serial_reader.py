@@ -1,11 +1,38 @@
-# src/serial_reader.py
 import logging
 import serial
 from src import config
 import time
 
+
 class SerialReader:
-    def __init__(self):
+    """
+    Ogólny czytnik ramek z portu szeregowego.
+
+    Parametryzowany, żeby jedna klasa obsługiwała dowolną liczbę
+    niezależnych portów (miernik, Arduino, ...) - każdy z własną
+    konfiguracją start/end char i baudrate.
+    """
+
+    def __init__(
+        self,
+        port: str,
+        baudrate: int,
+        timeout: float,
+        start_char: bytes | None,
+        end_char_1: bytes | None,
+        end_char_2: bytes | None,
+        reconnect_delay: float = config.RECONNECT_DELAY,
+        name: str = "serial",
+    ):
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.start_char = start_char
+        self.end_char_1 = end_char_1
+        self.end_char_2 = end_char_2
+        self.reconnect_delay = reconnect_delay
+        self.name = name  # etykieta do logów, np. "miernik" / "arduino"
+
         self.ser = None
         self.buffer = b""
         self._connect()
@@ -13,13 +40,13 @@ class SerialReader:
     def _connect(self):
         try:
             self.ser = serial.Serial(
-                port=config.SERIAL_PORT,
-                baudrate=config.BAUDRATE,
-                timeout=config.TIMEOUT
+                port=self.port,
+                baudrate=self.baudrate,
+                timeout=self.timeout
             )
-            logging.info(f"Połączono pomyślnie z {config.SERIAL_PORT}")
+            logging.info(f"[{self.name}] Połączono pomyślnie z {self.port}")
         except Exception as e:
-            logging.error(f"Nie udało się otworzyć portu: {e}")
+            logging.error(f"[{self.name}] Nie udało się otworzyć portu: {e}")
             self.ser = None
 
     def read_next_frame(self):
@@ -27,7 +54,7 @@ class SerialReader:
         if not self.ser or not self.ser.is_open:
             self._connect()
             if not self.ser or not self.ser.is_open:
-                time.sleep(5)  # Odczekaj 5 sekund przed kolejną próbą, jeśli się nie udało
+                time.sleep(self.reconnect_delay)  # Odczekaj przed kolejną próbą, jeśli się nie udało
                 return None
 
         try:
@@ -35,24 +62,24 @@ class SerialReader:
                 self.buffer += self.ser.read(self.ser.in_waiting)
 
             # Budujemy sekwencję końca
-            end_seq = config.END_CHAR_1 if config.END_CHAR_1 else b""
-            if config.END_CHAR_2:
-                end_seq += config.END_CHAR_2
+            end_seq = self.end_char_1 if self.end_char_1 else b""
+            if self.end_char_2:
+                end_seq += self.end_char_2
 
             if not end_seq:
-                logging.error("Konfiguracja błędu: Brak zdefiniowanego znaku końca!")
+                logging.error(f"[{self.name}] Konfiguracja błędu: Brak zdefiniowanego znaku końca!")
                 return None
 
             # Sprawdzamy, czy w buforze jest znacznik końca
             if end_seq in self.buffer:
                 end_idx = self.buffer.index(end_seq)
-                
+
                 # PRZYPADEK A: Ze znakiem startu
-                if config.START_CHAR is not None:
-                    if config.START_CHAR in self.buffer:
-                        start_idx = self.buffer.index(config.START_CHAR)
+                if self.start_char is not None:
+                    if self.start_char in self.buffer:
+                        start_idx = self.buffer.index(self.start_char)
                         if start_idx < end_idx:
-                            frame = self.buffer[start_idx + len(config.START_CHAR):end_idx]
+                            frame = self.buffer[start_idx + len(self.start_char):end_idx]
                             self.buffer = self.buffer[end_idx + len(end_seq):]
                             return frame
                         else:
@@ -69,10 +96,10 @@ class SerialReader:
                     return frame
 
         except serial.SerialException as e:
-            logging.error(f"Błąd portu szeregowego: {e}. Czyszczenie i ponowna próba za 5s...")
+            logging.error(f"[{self.name}] Błąd portu szeregowego: {e}. Czyszczenie i ponowna próba za {self.reconnect_delay}s...")
             self._handle_disconnect()
         except Exception as e:
-            logging.error(f"Nieoczekiwany błąd odczytu (np. Input/output error): {e}. Próba rekonfiguracji za 5s...")
+            logging.error(f"[{self.name}] Nieoczekiwany błąd odczytu (np. Input/output error): {e}. Próba rekonfiguracji za {self.reconnect_delay}s...")
             self._handle_disconnect()
 
         return None
@@ -86,4 +113,4 @@ class SerialReader:
             pass
         self.ser = None
         self.buffer = b""  # Czyścimy bufor ze starych, urwanych śmieci
-        time.sleep(5)      # Kluczowe! Nie pozwalamy pętli zajechać procesora
+        time.sleep(self.reconnect_delay)  # Kluczowe! Nie pozwalamy pętli zajechać procesora
