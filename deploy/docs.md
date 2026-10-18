@@ -224,3 +224,149 @@ podczas działania usługi.
 | Usługa restartuje się w kółko | `journalctl -u measurement-data-saver.service \| grep CRITICAL` - poszukaj przyczyny fatalnego błędu |
 | Brak nowych danych w bazie mimo działającej usługi | Sprawdź sniffer em, czy port w ogóle wysyła dane; sprawdź czy `SAVE_DELAY`/logika nie czeka na pierwszą poprawną ramkę |
 | Dziwne/urwane linie w logach jako WARNING | Zobacz sekcję "Format danych z Arduino" wyżej - jeśli to nie banner startowy, może być realny problem z transmisją (np. luźny kabel USB) |
+
+---
+
+## Narzędzia dla obsługi na obiekcie
+
+RPi na obiekcie włącza i podłącza osoba nietechniczna. Z laptopa z Windows,
+połączonego z RPi kablem Ethernet (`ssh andrzej@10.10.10.1`), uruchamia
+dwukliknięciem dwa programy:
+
+| Program na laptopie | Kiedy | Co robi na RPi |
+|---|---|---|
+| `Ustaw_czas_Raspberry_Pi.bat` | raz, po każdym włączeniu RPi | `deploy/tools/run.sh set_time <czas laptopa>`: ustawia zegar (`sudo -n /usr/local/sbin/measurement-data-saver-set-clock <ts>`), restartuje usługę (nowa sesja z poprawnym czasem), wypisuje czas przed i po |
+| `Sprawdz_Raspberry_Pi.bat` | dowolnie wiele razy | `deploy/tools/run.sh check --laptop-time <czas laptopa>`: ok. 15 s obserwacji (`--window`), raport i werdykt; niczego nie zmienia |
+
+RPi nie ma RTC ani internetu, więc po każdym włączeniu `systemd-timesyncd`
+odtwarza czas ostatniego zamknięcia i zegar jest do tyłu. Dlatego
+najpierw ustawienie czasu, potem sprawdzanie.
+
+Kod narzędzi: `src/tools/` (`check.py`, `set_time.py`, wspólne `report.py`
+i `system.py`, adresy czujników w `sensors.py`). Usługa ich nie importuje.
+
+### Jak czytać wynik sprawdzania
+
+Każda linia ma znacznik, pod nią czasem wskazówka:
+
+| Znacznik | Znaczenie |
+|---|---|
+| `[ OK ]` | działa |
+| `[INFO]` | informacja, nigdy problem (np. zmiana sygnału w trakcie sprawdzania) |
+| `[UWAGA]` | działa, ale coś wymaga uwagi (zegar, autostart, logi, dysk, nieznany czujnik) |
+| `[BŁĄD]` | nie działa |
+
+Na dole `WYNIK: WSZYSTKO DZIAŁA` albo `WYNIK: N problem(y/ów) – <lista>`
+(każda `[UWAGA]` i każdy `[BŁĄD]` to jeden problem).
+
+Jak walidacja rozpoznaje przyczyny (pierwsza pasująca reguła wygrywa):
+
+| Komunikat | Skąd to wiadomo |
+|---|---|
+| `Miernik: wskazanie … (+N zapisów)` | przybyło wierszy w `measurements` (`MAX(id)` przed i po oknie) |
+| `Miernik: nie wykryto przejściówki USB` | brak pliku `SERIAL_PORT` z `config.py`; inne `/dev/ttyUSB*` są wypisywane |
+| `Miernik: … nie da się otworzyć portu` | w logach z okna `[miernik] Nie udało się otworzyć portu` |
+| `Miernik: przychodzą dane w nieoczekiwanym formacie` | w logach `(niesparsowana) ramka:` |
+| `Miernik: … brak danych z miernika` | w logach `cisza na porcie` |
+| `Arduino: podłączone, wysyła dane` | przybyły temperatury lub zmiany pinów albo w logach jest pusta ramka `temps` |
+| `Temperatury: Arduino nie wykrywa żadnego czujnika` | tylko puste ramki `{"temps":[]}` w oknie |
+| `Czujnik N: błąd odczytu` | ostatni odczyt w oknie to `-127` albo `85` (wartości błędu w firmware) |
+| `Sygnały: brak stanu sygnałów` | brak wierszy `pin_states` w bieżącej sesji (pełny stan jest zapisywany przy pierwszej ramce po starcie) |
+| `Usługa uruchomiła się ponownie w trakcie sprawdzania` | zmiana `MainPID` albo `NRestarts` w oknie |
+| `Usługa zgłaszała zawieszenie wątku` | w logach `Pomijam watchdog` |
+
+Wzorce logów są stałymi na górze `src/tools/check.py` - zmiana treści logów
+usługi wymaga zmiany walidacji. Bez dostępu do journala (grupa
+`systemd-journal`) przyczyny nie zostaną rozpoznane, walidacja zgłosi to jako
+`[UWAGA]`. Gdy Arduino nie widzi żadnego czujnika i nie zmienia się żaden
+sygnał, jedynym śladem działającego Arduino są te logi.
+
+### Jednorazowe przygotowanie RPi
+
+```bash
+cd /home/andrzej/Storage/measurement-data-saver
+git pull
+./deploy/install-tools.sh
+```
+
+Skrypt można uruchamiać wielokrotnie. Zmienia tylko trzy rzeczy:
+
+1. Kopiuje `deploy/tools/set-clock.sh` do
+   `/usr/local/sbin/measurement-data-saver-set-clock` (właściciel root, więc
+   zmiana pliku w repo nic nie daje bez ponownego uruchomienia skryptu).
+   Skrypt przyjmuje tylko jedną liczbę i wykonuje `date -u -s @<liczba>`.
+2. Plik `/etc/sudoers.d/measurement-data-saver-tools` z jedną regułą: `andrzej`
+   może bez hasła wykonać ten skrypt i
+   `systemctl restart measurement-data-saver.service` - nic więcej. Plik jest
+   sprawdzany `visudo -cf` przed zapisem. Bez tej reguły `sudo` przez SSH bez
+   terminala zawiesiłby się na pytaniu o hasło. Osobny skrypt zamiast reguły
+   `date -u -s @*`, bo `sudo-rs` nie dopuszcza `*` w argumentach, a w
+   klasycznym `sudo` `*` przepuściłby dowolne dodatkowe argumenty `date`.
+3. Dodaje `andrzej` do grupy `systemd-journal`, żeby `journalctl` bez `sudo`
+   widział logi usługi.
+
+Na końcu sam sprawdza, czy reguła działa. Ręczne sprawdzenie:
+
+```bash
+sudo -k; sudo -n -l          # powinno pokazać obie komendy z NOPASSWD, bez pytania o hasło
+groups                       # powinno zawierać systemd-journal (po ponownym zalogowaniu)
+journalctl -u measurement-data-saver.service -n 5   # bez sudo, powinno pokazać logi
+```
+
+Cofnięcie: `sudo rm /etc/sudoers.d/measurement-data-saver-tools /usr/local/sbin/measurement-data-saver-set-clock` oraz
+`sudo gpasswd -d andrzej systemd-journal`.
+
+### Jednorazowe przygotowanie laptopa (Windows 11)
+
+1. Klucz SSH (PowerShell; w PowerShellu `$env:USERPROFILE`, nie `%USERPROFILE%`):
+
+   ```powershell
+   ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\dms_diagnoza -N '""'
+   type $env:USERPROFILE\.ssh\dms_diagnoza.pub
+   ```
+
+   Wypisaną linię dopisać na RPi do `~/.ssh/authorized_keys`. Klucz jest
+   per konto Windows - inne konto na tym samym laptopie potrzebuje własnego.
+2. Pobrać oba pliki z `deploy/windows/` prosto z GitHuba (strona pliku →
+   „Download raw file”) i zapisać na pulpicie. Pliki są w repo z końcami linii
+   CRLF (`.gitattributes`: `*.bat -text`), więc działają bez poprawek.
+   Nie przenosić ich przez `scp` z Linuksa ani nie edytować edytorem, który
+   zmienia końce linii.
+3. Odblokować pobrane pliki: Właściwości → „Odblokuj”, albo w PowerShellu
+   `Unblock-File $env:USERPROFILE\Desktop\*_Raspberry_Pi.bat`.
+4. Test: kabel podłączony, dwuklik `Sprawdz_Raspberry_Pi.bat`. Pierwsze
+   połączenie samo zapisze klucz hosta RPi (`StrictHostKeyChecking=accept-new`).
+
+Ustawienia (adres, użytkownik, klucz, katalog repo na RPi) są na górze
+każdego `.bat`.
+
+### Ręczne odpowiedniki
+
+Z laptopa (PowerShell), bez plików `.bat`:
+
+```powershell
+$ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+ssh -i $env:USERPROFILE\.ssh\dms_diagnoza andrzej@10.10.10.1 "bash ~/Storage/measurement-data-saver/deploy/tools/run.sh set_time $ts"
+ssh -i $env:USERPROFILE\.ssh\dms_diagnoza andrzej@10.10.10.1 "bash ~/Storage/measurement-data-saver/deploy/tools/run.sh check --laptop-time $ts"
+```
+
+Na RPi, krok po kroku to samo co walidacja:
+
+```bash
+systemctl show measurement-data-saver.service --timestamp=unix -p ActiveState,UnitFileState,MainPID,NRestarts,ActiveEnterTimestamp
+journalctl -u measurement-data-saver.service --since "-1min" -o cat --no-pager
+ls /dev/ttyUSB* /dev/ttyACM*
+sqlite3 db/measurement-data-saver.db "SELECT MAX(id) FROM measurements;"     # dwa razy w odstępie kilku sekund
+sqlite3 db/measurement-data-saver.db "SELECT sensor_address, value FROM temperature_measurements ORDER BY id DESC LIMIT 4;"
+sqlite3 db/measurement-data-saver.db "SELECT pin, value FROM pin_states WHERE session_id = (SELECT MAX(id) FROM sessions);"
+```
+
+i ustawianie czasu:
+
+```bash
+sudo date -u -s @$(date +%s)        # zamiast $(date +%s) czas laptopa
+sudo systemctl restart measurement-data-saver.service
+```
+
+Stary `~/diagnoza/` na RPi i `Diagnostyka Raspberry Pi.bat` na laptopie
+zastępują te narzędzia - można je usunąć.
