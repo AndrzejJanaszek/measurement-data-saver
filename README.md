@@ -27,6 +27,9 @@ się jednego z komponentów.
   systemd)
 - Narzędzie `sniffer` do debugowania obu portów niezależnie od siebie,
   przed odpaleniem właściwej usługi
+- Narzędzia dla obsługi na obiekcie (`src/tools/`, launchery Windows
+  w `deploy/windows/`): ustawienie czasu RPi z laptopa i walidacja z raportem
+  po polsku - patrz `deploy/docs.md`, sekcja „Narzędzia dla obsługi na obiekcie”
 
 ## Architektura
 
@@ -118,8 +121,12 @@ watchdoga i typowych problemów: **[`docs.md`](./docs.md)**.
 measurement-data-saver/
 ├── db/                          # baza SQLite (w repo, nie w .gitignore)
 ├── deploy/
+│   ├── tools/run.sh             # wrapper narzędzi wołany przez ssh z laptopa
+│   ├── windows/                 # launchery .bat dla obsługi na obiekcie (CRLF w repo)
+│   ├── install-tools.sh         # jednorazowe przygotowanie RPi pod narzędzia
 │   └── measurement-data-saver.service
 ├── src/
+│   ├── tools/                   # walidacja (check.py) i ustawianie czasu (set_time.py), poza usługą
 │   ├── workers/
 │   │   ├── meter_worker.py
 │   │   └── arduino_worker.py
@@ -131,6 +138,7 @@ measurement-data-saver/
 │   ├── pin_tracker.py
 │   ├── serial_reader.py
 │   └── sniffer.py
+├── .gitattributes               # końce linii: *.sh LF, *.bat bez konwersji
 ├── install.sh
 ├── docs.md                      # ściągawka operacyjna (systemctl, debugowanie)
 └── README.md                    # ten plik
