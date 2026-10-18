@@ -4,16 +4,19 @@ set -e
 
 SERVICE_NAME="measurement-data-saver.service"
 SUDOERS_FILE="/etc/sudoers.d/measurement-data-saver-tools"
+CLOCK_HELPER="/usr/local/sbin/measurement-data-saver-set-clock"
 TARGET_USER="${SUDO_USER:-$USER}"
-DATE_PATH="$(command -v date)"
 SYSTEMCTL_PATH="$(command -v systemctl)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "=== Przygotowanie narzędzi dla obsługi na obiekcie (użytkownik: ${TARGET_USER}) ==="
 
 echo "[1/3] Uprawnienia sudo bez hasła: ustawianie czasu i restart usługi..."
+sudo install -m 0755 -o root -g root "${SCRIPT_DIR}/tools/set-clock.sh" "$CLOCK_HELPER"
+echo "      Zainstalowano ${CLOCK_HELPER}."
 TMP_FILE="$(mktemp)"
 trap 'rm -f "$TMP_FILE"' EXIT
-echo "${TARGET_USER} ALL=(root) NOPASSWD: ${DATE_PATH} -u -s @*, ${SYSTEMCTL_PATH} restart ${SERVICE_NAME}" > "$TMP_FILE"
+echo "${TARGET_USER} ALL=(root) NOPASSWD: ${CLOCK_HELPER}, ${SYSTEMCTL_PATH} restart ${SERVICE_NAME}" > "$TMP_FILE"
 sudo visudo -cf "$TMP_FILE"
 sudo install -m 0440 -o root -g root "$TMP_FILE" "$SUDOERS_FILE"
 echo "      Zapisano ${SUDOERS_FILE}:"
@@ -31,7 +34,7 @@ fi
 echo "[3/3] Samosprawdzenie (bez hasła)..."
 sudo -k
 FAILED=0
-if sudo -n -l "$DATE_PATH" -u -s @0 >/dev/null 2>&1; then
+if sudo -n -l "$CLOCK_HELPER" 0 >/dev/null 2>&1; then
     echo "      [ OK ] ustawianie czasu"
 else
     echo "      [BŁĄD] ustawianie czasu - sudo nadal wymaga hasła"

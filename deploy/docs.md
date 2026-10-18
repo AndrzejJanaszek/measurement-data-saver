@@ -235,7 +235,7 @@ dwukliknięciem dwa programy:
 
 | Program na laptopie | Kiedy | Co robi na RPi |
 |---|---|---|
-| `Ustaw_czas_Raspberry_Pi.bat` | raz, po każdym włączeniu RPi | `deploy/tools/run.sh set_time <czas laptopa>`: ustawia zegar (`sudo -n date -u -s @<ts>`), restartuje usługę (nowa sesja z poprawnym czasem), wypisuje czas przed i po |
+| `Ustaw_czas_Raspberry_Pi.bat` | raz, po każdym włączeniu RPi | `deploy/tools/run.sh set_time <czas laptopa>`: ustawia zegar (`sudo -n /usr/local/sbin/measurement-data-saver-set-clock <ts>`), restartuje usługę (nowa sesja z poprawnym czasem), wypisuje czas przed i po |
 | `Sprawdz_Raspberry_Pi.bat` | dowolnie wiele razy | `deploy/tools/run.sh check --laptop-time <czas laptopa>`: ok. 15 s obserwacji (`--window`), raport i werdykt; niczego nie zmienia |
 
 RPi nie ma RTC ani internetu, więc po każdym włączeniu `systemd-timesyncd`
@@ -289,14 +289,20 @@ git pull
 ./deploy/install-tools.sh
 ```
 
-Skrypt można uruchamiać wielokrotnie. Zmienia tylko dwie rzeczy:
+Skrypt można uruchamiać wielokrotnie. Zmienia tylko trzy rzeczy:
 
-1. Plik `/etc/sudoers.d/measurement-data-saver-tools` z jedną regułą: `andrzej`
-   może bez hasła wykonać `date -u -s @<liczba>` i
+1. Kopiuje `deploy/tools/set-clock.sh` do
+   `/usr/local/sbin/measurement-data-saver-set-clock` (właściciel root, więc
+   zmiana pliku w repo nic nie daje bez ponownego uruchomienia skryptu).
+   Skrypt przyjmuje tylko jedną liczbę i wykonuje `date -u -s @<liczba>`.
+2. Plik `/etc/sudoers.d/measurement-data-saver-tools` z jedną regułą: `andrzej`
+   może bez hasła wykonać ten skrypt i
    `systemctl restart measurement-data-saver.service` - nic więcej. Plik jest
    sprawdzany `visudo -cf` przed zapisem. Bez tej reguły `sudo` przez SSH bez
-   terminala zawiesiłby się na pytaniu o hasło.
-2. Dodaje `andrzej` do grupy `systemd-journal`, żeby `journalctl` bez `sudo`
+   terminala zawiesiłby się na pytaniu o hasło. Osobny skrypt zamiast reguły
+   `date -u -s @*`, bo `sudo-rs` nie dopuszcza `*` w argumentach, a w
+   klasycznym `sudo` `*` przepuściłby dowolne dodatkowe argumenty `date`.
+3. Dodaje `andrzej` do grupy `systemd-journal`, żeby `journalctl` bez `sudo`
    widział logi usługi.
 
 Na końcu sam sprawdza, czy reguła działa. Ręczne sprawdzenie:
@@ -307,7 +313,7 @@ groups                       # powinno zawierać systemd-journal (po ponownym za
 journalctl -u measurement-data-saver.service -n 5   # bez sudo, powinno pokazać logi
 ```
 
-Cofnięcie: `sudo rm /etc/sudoers.d/measurement-data-saver-tools` oraz
+Cofnięcie: `sudo rm /etc/sudoers.d/measurement-data-saver-tools /usr/local/sbin/measurement-data-saver-set-clock` oraz
 `sudo gpasswd -d andrzej systemd-journal`.
 
 ### Jednorazowe przygotowanie laptopa (Windows 11)

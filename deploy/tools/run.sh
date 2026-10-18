@@ -33,7 +33,7 @@ fi
 
 if [ "$TOOL" = "set_time" ]; then
     BEFORE=$(date +%s)
-    DATE_ERROR=$(sudo -n date -u -s "@${REQUESTED}" 2>&1 >/dev/null)
+    DATE_ERROR=$(sudo -n /usr/local/sbin/measurement-data-saver-set-clock "$REQUESTED" 2>&1 >/dev/null)
     DATE_STATUS=$?
 
     set -- --requested "$REQUESTED" --before "$BEFORE" --date-status "$DATE_STATUS" "--date-error=${DATE_ERROR}" "$@"

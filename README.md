@@ -122,6 +122,7 @@ measurement-data-saver/
 ├── db/                          # baza SQLite (w repo, nie w .gitignore)
 ├── deploy/
 │   ├── tools/run.sh             # wrapper narzędzi wołany przez ssh z laptopa
+│   ├── tools/set-clock.sh       # ustawienie zegara, instalowane jako root przez install-tools.sh
 │   ├── windows/                 # launchery .bat dla obsługi na obiekcie (CRLF w repo)
 │   ├── install-tools.sh         # jednorazowe przygotowanie RPi pod narzędzia
 │   └── measurement-data-saver.service
