@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from src.tools import set_time, system
+from src.tools import service_restart, set_time, system
 
 ACTIVE = "ActiveState=active\nUnitFileState=enabled\nMainPID=42\nNRestarts=0\nActiveEnterTimestamp=@1792319840\n"
 FAILED = "ActiveState=failed\nUnitFileState=enabled\nMainPID=0\nNRestarts=0\nActiveEnterTimestamp=\n"
@@ -25,7 +25,7 @@ class FakeRun:
 @pytest.fixture(autouse=True)
 def no_color_no_sleep(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
-    monkeypatch.setattr(set_time.time, "sleep", lambda _: None)
+    monkeypatch.setattr(service_restart.time, "sleep", lambda _: None)
 
 
 @pytest.fixture

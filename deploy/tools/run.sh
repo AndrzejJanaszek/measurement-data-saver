@@ -6,7 +6,11 @@ TOOL="${1:-}"
 shift || true
 
 case "$TOOL" in
-    check)
+    check|dump)
+        ;;
+    dump_cleanup)
+        TOOL=dump
+        set -- --cleanup "$@"
         ;;
     set_time)
         REQUESTED="${1:-}"
@@ -17,7 +21,7 @@ case "$TOOL" in
         shift
         ;;
     *)
-        echo "Nieznane narzędzie: '${TOOL}'. Dostępne: check, set_time." >&2
+        echo "Nieznane narzędzie: '${TOOL}'. Dostępne: check, set_time, dump, dump_cleanup." >&2
         exit 2
         ;;
 esac

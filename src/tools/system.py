@@ -1,12 +1,18 @@
+import contextlib
 import glob
 import shutil
 import socket
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from src import config
+
 SERVICE = "measurement-data-saver.service"
 SERVICE_PROPERTIES = ("ActiveState", "UnitFileState", "MainPID", "NRestarts", "ActiveEnterTimestamp")
+SUDO_ERROR_PREFIXES = ("sudo:", "sudo-rs:")
+DATABASE_TIMEOUT = 5.0
 
 
 @dataclass(frozen=True)
@@ -50,6 +56,16 @@ def parse_unix_timestamp(value: str) -> float | None:
 
 def restart_service() -> subprocess.CompletedProcess:
     return run(["sudo", "-n", "systemctl", "restart", SERVICE])
+
+
+def open_database_readonly(path: str | Path) -> sqlite3.Connection:
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    return sqlite3.connect(uri, uri=True, timeout=DATABASE_TIMEOUT)
+
+
+def query_database(query, *args):
+    with contextlib.closing(open_database_readonly(config.DB_PATH)) as conn:
+        return query(conn, *args)
 
 
 def read_journal(since: float) -> list[str]:

@@ -1,25 +1,10 @@
 import argparse
 import sys
-import time
 
-from src.tools import system
+from src.tools import service_restart, system
 from src.tools.report import INSTALL_TOOLS_HINT, Level, Result, format_duration, format_line, format_time
 
-RESTART_TIMEOUT = 10.0
-POLL_INTERVAL = 0.5
 SECTION = "Czas"
-SUDO_ERROR_PREFIXES = ("sudo:", "sudo-rs:")
-
-
-def wait_until_active(timeout: float) -> system.ServiceState:
-    deadline = time.monotonic() + timeout
-    state = system.read_service()
-
-    while not state.is_active and time.monotonic() < deadline:
-        time.sleep(POLL_INTERVAL)
-        state = system.read_service()
-
-    return state
 
 
 def time_set(requested: float, before: float) -> Result:
@@ -30,20 +15,8 @@ def time_set(requested: float, before: float) -> Result:
     return Result(SECTION, Level.OK, text)
 
 
-def restart() -> Result:
-    result = system.restart_service()
-    if result.returncode != 0 and result.stderr.startswith(SUDO_ERROR_PREFIXES):
-        return Result(SECTION, Level.ERROR, "Brak uprawnień do ponownego uruchomienia usługi.", (INSTALL_TOOLS_HINT,))
-
-    state = wait_until_active(RESTART_TIMEOUT)
-    if not state.is_active:
-        return Result(SECTION, Level.ERROR, f"Usługa nie uruchomiła się ponownie (stan: {state.active_state}).")
-
-    return Result(SECTION, Level.OK, "Usługa zapisu danych uruchomiona ponownie.")
-
-
 def date_failed(date_status: int, date_error: str) -> Result:
-    if date_error.startswith(SUDO_ERROR_PREFIXES):
+    if date_error.startswith(system.SUDO_ERROR_PREFIXES):
         return Result(SECTION, Level.ERROR, "Brak uprawnień do zmiany czasu.", (INSTALL_TOOLS_HINT,))
 
     reason = " ".join(date_error.split()) or f"kod wyjścia {date_status}"
@@ -54,7 +27,7 @@ def run(requested: float, before: float, date_status: int, date_error: str = "")
     if date_status != 0:
         return [date_failed(date_status, date_error)]
 
-    return [time_set(requested, before), restart()]
+    return [time_set(requested, before), service_restart.restart(SECTION)]
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
