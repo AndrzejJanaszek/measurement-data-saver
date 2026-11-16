@@ -28,8 +28,10 @@ się jednego z komponentów.
 - Narzędzie `sniffer` do debugowania obu portów niezależnie od siebie,
   przed odpaleniem właściwej usługi
 - Narzędzia dla obsługi na obiekcie (`src/tools/`, launchery Windows
-  w `deploy/windows/`): ustawienie czasu RPi z laptopa i walidacja z raportem
-  po polsku - patrz `deploy/docs.md`, sekcja „Narzędzia dla obsługi na obiekcie”
+  w `deploy/windows/`): ustawienie czasu RPi z laptopa, walidacja z raportem
+  po polsku i zgrywanie bazy na laptopa (restart usługi + kopia SQLite na
+  żywo, przerwa w zapisie ok. 4 s) - patrz `deploy/docs.md`, sekcja
+  „Narzędzia dla obsługi na obiekcie”
 
 ## Architektura
 
@@ -127,7 +129,7 @@ measurement-data-saver/
 │   ├── install-tools.sh         # jednorazowe przygotowanie RPi pod narzędzia
 │   └── measurement-data-saver.service
 ├── src/
-│   ├── tools/                   # walidacja (check.py) i ustawianie czasu (set_time.py), poza usługą
+│   ├── tools/                   # walidacja (check.py), ustawianie czasu (set_time.py), zgrywanie bazy (dump.py), poza usługą
 │   ├── workers/
 │   │   ├── meter_worker.py
 │   │   └── arduino_worker.py

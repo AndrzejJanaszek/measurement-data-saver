@@ -231,19 +231,22 @@ podczas działania usługi.
 
 RPi na obiekcie włącza i podłącza osoba nietechniczna. Z laptopa z Windows,
 połączonego z RPi kablem Ethernet (`ssh andrzej@10.10.10.1`), uruchamia
-dwukliknięciem dwa programy:
+dwukliknięciem trzy programy:
 
 | Program na laptopie | Kiedy | Co robi na RPi |
 |---|---|---|
 | `Ustaw_czas_Raspberry_Pi.bat` | raz, po każdym włączeniu RPi | `deploy/tools/run.sh set_time <czas laptopa>`: ustawia zegar (`sudo -n /usr/local/sbin/measurement-data-saver-set-clock <ts>`), restartuje usługę (nowa sesja z poprawnym czasem), wypisuje czas przed i po |
 | `Sprawdz_Raspberry_Pi.bat` | dowolnie wiele razy | `deploy/tools/run.sh check --laptop-time <czas laptopa>`: ok. 15 s obserwacji (`--window`), raport i werdykt; niczego nie zmienia |
+| `Zgraj_baze_Raspberry_Pi.bat` | gdy potrzebne są dane do analizy (raz na tydzień–dwa) | `deploy/tools/run.sh dump`: restart usługi (nowa sesja), kopia bazy na żywo, potem pobranie na laptopa i `run.sh dump_cleanup` – szczegóły w „Zgrywanie bazy” niżej |
 
 RPi nie ma RTC ani internetu, więc po każdym włączeniu `systemd-timesyncd`
 odtwarza czas ostatniego zamknięcia i zegar jest do tyłu. Dlatego
 najpierw ustawienie czasu, potem sprawdzanie.
 
-Kod narzędzi: `src/tools/` (`check.py`, `set_time.py`, wspólne `report.py`
-i `system.py`, adresy czujników w `sensors.py`). Usługa ich nie importuje.
+Kod narzędzi: `src/tools/` (`check.py`, `set_time.py`, `dump.py`, wspólne
+`report.py` (wyniki i formatowanie), `system.py` (systemctl, journal, sudo,
+odczyt bazy tylko do odczytu) i `service_restart.py`, adresy czujników
+w `sensors.py`). Usługa ich nie importuje.
 
 ### Jak czytać wynik sprawdzania
 
@@ -280,6 +283,86 @@ usługi wymaga zmiany walidacji. Bez dostępu do journala (grupa
 `systemd-journal`) przyczyny nie zostaną rozpoznane, walidacja zgłosi to jako
 `[UWAGA]`. Gdy Arduino nie widzi żadnego czujnika i nie zmienia się żaden
 sygnał, jedynym śladem działającego Arduino są te logi.
+
+### Zgrywanie bazy
+
+`Zgraj_baze_Raspberry_Pi.bat` zgrywa całą bazę bez zatrzymywania zapisu
+na dłużej niż sam restart usługi:
+
+1. RPi (`run.sh dump`, kod w `src/tools/dump.py`):
+   1. usuwa stare pliki z `~/measurement-data-saver-dumps/` i sprawdza, czy
+      na karcie jest miejsce na kopię (rozmiar bazy z `-wal` + 200 MB); za mało
+      → koniec bez restartu i bez kopii;
+   2. restartuje usługę (`sudo -n systemctl restart`, reguła z
+      `install-tools.sh`) i czeka do 20 s, aż nowa sesja zapisze wskazanie;
+   3. kopiuje bazę wbudowanym backupem SQLite (`sqlite3.Connection.backup`)
+      do `dump.db`: kopia to stan z jednej chwili razem z zawartością `-wal`,
+      usługa w tym czasie zapisuje dalej. Kopia jest przełączana z WAL na
+      zwykły tryb (samodzielny plik, bez `-wal`/`-shm`) i sprawdzana
+      `PRAGMA integrity_check`;
+   4. zapisuje SHA-256 kopii w `dump.sha256` i wypisuje podsumowanie: sesja
+      zamknięta zgraniem (wskazania od–do, liczby wierszy) i nowa sesja.
+2. Laptop: pobiera `dump.db` i `dump.sha256` przez `scp` do
+   `Pulpit\Zrzuty_bazy\measurement-data-saver_RRRR-MM-DD_GGMM.db`
+   (i `.sha256` obok; data i godzina laptopa, Pulpit według Windows, także
+   gdy jest w OneDrive), porównuje SHA-256 (`Get-FileHash`) i dopiero przy
+   zgodnych sumach usuwa kopię z RPi (`run.sh dump_cleanup`).
+
+Koszt: przerwa w zapisie ok. 4 s (2–3 brakujące wskazania, tyle co każdy
+restart usługi) i nowa sesja przy każdym zgraniu, więc stara sesja jest
+w zrzucie kompletna. Kopia trwa kilkanaście–kilkadziesiąt sekund (baza ok.
+250 MB, rośnie ok. 18 MB na dobę); w tym czasie plik `-wal` chwilowo rośnie.
+
+Kody wyjścia `run.sh dump`: `0` = kopia i restart w porządku, `3` = kopia
+jest, ale były problemy (restart, nowa sesja nie zapisuje) – launcher i tak
+ją pobiera i każe uruchomić `Sprawdz_Raspberry_Pi.bat`, `2` = brak kopii.
+Każdy inny kod (np. `1` z `run.sh` przy braku Poetry albo z nieobsłużonego
+wyjątku) launcher traktuje jak brak kopii, żeby nie pobrać starej kopii
+zostawionej po poprzednim nieudanym pobraniu. Restart nie blokuje kopii:
+zgranie danych jest ważniejsze.
+
+Launcher najpierw sprawdza samo logowanie, więc kod `255` z `ssh` w trakcie
+zgrywania oznacza zerwane połączenie (kabel), nie problem z kluczem.
+
+Niezgodne sumy albo nieudane pobranie: launcher usuwa pobrany plik z laptopa,
+kopia na RPi zostaje. Wystarczy uruchomić launcher jeszcze raz (zrobi nowy
+restart i nową kopię) albo pobrać zostawioną kopię ręcznie (niżej).
+
+Ręcznie z laptopa (PowerShell):
+
+```powershell
+$key = "$env:USERPROFILE\.ssh\dms_diagnoza"
+ssh -i $key andrzej@10.10.10.1 "bash ~/Storage/measurement-data-saver/deploy/tools/run.sh dump"
+scp -i $key andrzej@10.10.10.1:measurement-data-saver-dumps/dump.db .\zrzut.db
+ssh -i $key andrzej@10.10.10.1 "cat measurement-data-saver-dumps/dump.sha256"
+(Get-FileHash -Algorithm SHA256 .\zrzut.db).Hash   # ma być taki sam jak wyżej (wielkość liter bez znaczenia)
+ssh -i $key andrzej@10.10.10.1 "bash ~/Storage/measurement-data-saver/deploy/tools/run.sh dump_cleanup"
+```
+
+Po stronie analizy (`dms-data-analysis`) zrzut dodaje się jak dotąd
+(`add-dump --pulled <data>`); nowy okres zaczyna się od nowej sesji.
+
+### Wgranie nowej wersji narzędzi bez internetu na RPi
+
+RPi na obiekcie nie ma internetu, więc `git pull` z GitHuba nie zadziała.
+Kod przenosi się paczką `git bundle`:
+
+```bash
+# na komputerze z aktualnym repo
+git bundle create mds.bundle main
+```
+
+Paczkę przenieść na laptop i dalej (PowerShell na laptopie):
+
+```powershell
+scp -i $env:USERPROFILE\.ssh\dms_diagnoza mds.bundle andrzej@10.10.10.1:~/
+ssh -i $env:USERPROFILE\.ssh\dms_diagnoza andrzej@10.10.10.1 "cd ~/Storage/measurement-data-saver && git pull ~/mds.bundle main && rm ~/mds.bundle"
+```
+
+Gdy zmienił się tylko kod narzędzi (`src/tools/`, `deploy/tools/`), usługi
+nie trzeba restartować – narzędzia są uruchamiane osobno. Zmiana kodu usługi
+wymaga `sudo systemctl restart measurement-data-saver.service`, zmiana
+`set-clock.sh` albo sudoers – ponownego `install-tools.sh`.
 
 ### Jednorazowe przygotowanie RPi
 
@@ -327,7 +410,7 @@ Cofnięcie: `sudo rm /etc/sudoers.d/measurement-data-saver-tools /usr/local/sbin
 
    Wypisaną linię dopisać na RPi do `~/.ssh/authorized_keys`. Klucz jest
    per konto Windows - inne konto na tym samym laptopie potrzebuje własnego.
-2. Pobrać oba pliki z `deploy/windows/` prosto z GitHuba (strona pliku →
+2. Pobrać wszystkie pliki z `deploy/windows/` prosto z GitHuba (strona pliku →
    „Download raw file”) i zapisać na pulpicie. Pliki są w repo z końcami linii
    CRLF (`.gitattributes`: `*.bat -text`), więc działają bez poprawek.
    Nie przenosić ich przez `scp` z Linuksa ani nie edytować edytorem, który

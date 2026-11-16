@@ -1,11 +1,9 @@
 import argparse
 import ast
-import contextlib
 import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 
 from src import config, worker_names
 from src.heartbeat import UNHEALTHY_AFTER
@@ -14,6 +12,7 @@ from src.tools.report import (
     INSTALL_TOOLS_HINT,
     Level,
     Result,
+    error,
     format_clock,
     format_duration,
     format_line,
@@ -21,7 +20,10 @@ from src.tools.report import (
     format_sections,
     format_time,
     format_verdict,
+    info,
+    ok,
     plural,
+    warning,
 )
 from src.tools.sensors import TEMPERATURE_SENSORS
 from src.tools.system import ServiceState
@@ -89,22 +91,6 @@ class Snapshot:
     database_error: str | None = None
     free_disk_bytes: int | None = None
     clock_offset: float | None = None
-
-
-def ok(section: str, text: str) -> Result:
-    return Result(section, Level.OK, text)
-
-
-def info(section: str, text: str) -> Result:
-    return Result(section, Level.INFO, text)
-
-
-def warning(section: str, text: str, hints: tuple[str, ...] = (), label: str = "") -> Result:
-    return Result(section, Level.WARNING, text, hints, label)
-
-
-def error(section: str, text: str, hints: tuple[str, ...] = (), label: str = "") -> Result:
-    return Result(section, Level.ERROR, text, hints, label)
 
 
 def tagged(lines: list[str], tag: str) -> list[str]:
@@ -412,11 +398,6 @@ def evaluate_disk(snapshot: Snapshot) -> list[Result]:
     return [warning(DISK, f"Mało miejsca na dysku: {format_number(free / 1e9, 1)} GB.", label="mało miejsca na dysku")]
 
 
-def open_database() -> sqlite3.Connection:
-    uri = Path(config.DB_PATH).resolve().as_uri() + "?mode=ro"
-    return sqlite3.connect(uri, uri=True, timeout=3)
-
-
 def read_max_ids(conn: sqlite3.Connection) -> dict[str, int]:
     tables = ("measurements", "temperature_measurements", "pin_states")
     return {table: conn.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()[0] for table in tables}
@@ -449,11 +430,6 @@ def read_window(conn: sqlite3.Connection, max_ids: dict[str, int]) -> Window:
         pin_changes=pin_changes,
         session_pins=dict(session_pins),
     )
-
-
-def query_database(query, *args):
-    with contextlib.closing(open_database()) as conn:
-        return query(conn, *args)
 
 
 def read_port(path: str) -> Port:
@@ -490,7 +466,7 @@ def collect(window_seconds: int, clock_offset: float | None) -> Snapshot:
         return unobserved(before, before, started - CRITICAL_LOOKBACK, None, common)
 
     try:
-        max_ids = query_database(read_max_ids)
+        max_ids = system.query_database(read_max_ids)
     except sqlite3.Error as exception:
         return unobserved(before, before, started - CRITICAL_LOOKBACK, str(exception), common)
 
@@ -498,7 +474,7 @@ def collect(window_seconds: int, clock_offset: float | None) -> Snapshot:
     after = system.read_service()
 
     try:
-        window = query_database(read_window, max_ids)
+        window = system.query_database(read_window, max_ids)
     except sqlite3.Error as exception:
         return unobserved(before, after, started, str(exception), common)
 

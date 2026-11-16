@@ -324,13 +324,13 @@ def test_database_window_reads_only_new_rows():
     old_session = database.create_session()
     write_rows(old_session, 3, {"28A8F126AB240B1C": 18.0}, {4: 0})
 
-    max_ids = check.query_database(check.read_max_ids)
+    max_ids = check.system.query_database(check.read_max_ids)
 
     session = database.create_session()
     write_rows(session, 2, {"28A8F126AB240B1C": 21.0, "28989298AA240B81": 22.0}, {4: 1, 5: 1})
     write_rows(session, 0, {"28A8F126AB240B1C": 21.5}, {5: 0})
 
-    window = check.query_database(check.read_window, max_ids)
+    window = check.system.query_database(check.read_window, max_ids)
 
     assert window.new_measurements == 2
     assert window.last_measurement == 10.5
@@ -340,13 +340,13 @@ def test_database_window_reads_only_new_rows():
 
 
 def test_database_is_opened_read_only():
-    with contextlib.closing(check.open_database()) as conn:
+    with contextlib.closing(check.system.open_database_readonly(config.DB_PATH)) as conn:
         with pytest.raises(sqlite3.OperationalError):
             conn.execute("INSERT INTO sessions (started_at) VALUES (1.0)")
 
 
 def fake_collect_environment(monkeypatch, query_database):
-    monkeypatch.setattr(check, "query_database", query_database)
+    monkeypatch.setattr(check.system, "query_database", query_database)
     monkeypatch.setattr(check, "countdown", lambda _: None)
     monkeypatch.setattr(check.system, "read_service", lambda: RUNNING)
     monkeypatch.setattr(check.system, "journal_readable", lambda: True)
@@ -372,7 +372,7 @@ def test_missing_database_raises_sqlite_error(tmp_path):
     config.DB_PATH = str(tmp_path / "missing.db")
 
     with pytest.raises(sqlite3.Error):
-        check.query_database(check.read_max_ids)
+        check.system.query_database(check.read_max_ids)
 
 
 @pytest.mark.parametrize(

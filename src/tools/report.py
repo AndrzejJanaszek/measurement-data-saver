@@ -39,6 +39,22 @@ class Result:
         return self.level in PROBLEM_LEVELS
 
 
+def ok(section: str, text: str) -> Result:
+    return Result(section, Level.OK, text)
+
+
+def info(section: str, text: str) -> Result:
+    return Result(section, Level.INFO, text)
+
+
+def warning(section: str, text: str, hints: tuple[str, ...] = (), label: str = "") -> Result:
+    return Result(section, Level.WARNING, text, hints, label)
+
+
+def error(section: str, text: str, hints: tuple[str, ...] = (), label: str = "") -> Result:
+    return Result(section, Level.ERROR, text, hints, label)
+
+
 def colored(text: str, color: str) -> str:
     if os.environ.get("NO_COLOR"):
         return text
